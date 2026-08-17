@@ -7,12 +7,6 @@ import (
 	"time"
 )
 
-// maxSearchPages is the ceiling on search continuation requests. Anonymous SSR
-// search returns a single window (the page's page_info reports has_next_page
-// false and a null end_cursor), so today the loop runs exactly once. The cap
-// exists so a future continuation mechanism can never loop unboundedly.
-const maxSearchPages = 20
-
 // searchSSR fetches the server-rendered search results page for a keyword. The
 // crawler user agent makes Threads render search results without a session or
 // browser, and the records use the same thread_items[].post shape the SSR
@@ -40,9 +34,9 @@ func validateSearchType(t string) error {
 }
 
 // Search streams keyword search hits from the anonymous server-rendered search
-// page. It deduplicates by post id and honors limit (0 = unlimited). searchType
-// carries the CLI --type flag; anything other than "top" is reported as
-// unsupported rather than silently falling back.
+// page. It honors limit (0 = unlimited). searchType carries the CLI --type
+// flag; anything other than "top" is reported as unsupported rather than
+// silently falling back.
 func (c *Client) Search(ctx context.Context, query, searchType string, limit int) iter.Seq2[SearchResult, error] {
 	return func(yield func(SearchResult, error) bool) {
 		if err := validateSearchType(searchType); err != nil {
@@ -50,34 +44,14 @@ func (c *Client) Search(ctx context.Context, query, searchType string, limit int
 			return
 		}
 
-		var posts []Post
-		seen := map[string]bool{}
-		for page := 0; page < maxSearchPages; page++ {
-			window, err := c.searchSSR(ctx, query)
-			if err != nil {
-				yield(SearchResult{}, err)
-				return
-			}
-			if len(window) == 0 {
-				break
-			}
-			added := 0
-			for _, p := range window {
-				if p.ID == "" || seen[p.ID] {
-					continue
-				}
-				seen[p.ID] = true
-				posts = append(posts, p)
-				added++
-			}
-			if added == 0 {
-				// No new posts in this window; a future continuation would only
-				// repeat what we already have, so stop.
-				break
-			}
-			// Anonymous SSR search has no continuation cursor today; this loop
-			// runs once. The break keeps a future cursor mechanism honest.
-			break
+		// Anonymous SSR search returns a single window (the page reports
+		// has_next_page=false and no cursor), so there is no continuation to
+		// walk. parsePostsSSR already deduplicates by post id within that
+		// window.
+		posts, err := c.searchSSR(ctx, query)
+		if err != nil {
+			yield(SearchResult{}, err)
+			return
 		}
 
 		n := 0

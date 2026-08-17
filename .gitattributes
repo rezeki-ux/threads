@@ -1,0 +1,3 @@
+# Normalise every text file to LF so gofmt/golangci-lint behave identically on
+# Windows and CI, regardless of core.autocrlf.
+* text=auto eol=lf

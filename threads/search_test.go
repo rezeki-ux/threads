@@ -85,7 +85,7 @@ func TestIsStaleGraphQLError(t *testing.T) {
 		errs []graphqlError
 		want bool
 	}{
-		{"missing_required_variable_value message", []graphqlError{{Message: "A server error missing_required_variable_value occured"}}, true},
+		{"missing_required_variable_value message", []graphqlError{{Message: "A server error missing_required_variable_value occurred"}}, true},
 		{"code 1675012", []graphqlError{{Code: 1675012}}, true},
 		{"ordinary error", []graphqlError{{Message: "rate limited"}}, false},
 		{"empty", nil, false},

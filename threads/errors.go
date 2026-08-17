@@ -4,13 +4,14 @@ import "fmt"
 
 // Exit codes, mapped to process exit status by cmd/th.
 const (
-	ExitOK        = 0
-	ExitGeneric   = 1
-	ExitUsage     = 2
-	ExitNotFound  = 3
-	ExitLoginWall = 4
-	ExitRateLimit = 5
-	ExitNetwork   = 6
+	ExitOK             = 0
+	ExitGeneric        = 1
+	ExitUsage          = 2
+	ExitNotFound       = 3
+	ExitLoginWall      = 4
+	ExitRateLimit      = 5
+	ExitNetwork        = 6
+	ExitOperationStale = 7
 )
 
 // CodeError carries an exit code alongside a message so main can map a library

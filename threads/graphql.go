@@ -3,6 +3,7 @@ package threads
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -41,7 +42,7 @@ func (c *Client) graphqlProfileThreads(ctx context.Context, userID, startCursor 
 		if cursor != "" {
 			vars["after"] = cursor
 		}
-		raw, err := c.graphqlPost(ctx, DocIDProfileThreads, vars)
+		raw, err := c.graphqlPost(ctx, c.cfg.DocIDProfileThreads, vars)
 		if err != nil {
 			return out, err
 		}
@@ -59,24 +60,17 @@ func (c *Client) graphqlProfileThreads(ctx context.Context, userID, startCursor 
 // persisted query.
 func (c *Client) graphqlPostReplies(ctx context.Context, postID string) ([]Post, error) {
 	vars := map[string]any{"postID": postID}
-	raw, err := c.graphqlPost(ctx, DocIDPostPage, vars)
+	raw, err := c.graphqlPost(ctx, c.cfg.DocIDPostPage, vars)
 	if err != nil {
 		return nil, err
 	}
 	return postsFromGraphQL(raw), nil
 }
 
-// graphqlSearch runs the logged-out keyword search query.
-func (c *Client) graphqlSearch(ctx context.Context, query string) ([]Post, error) {
-	vars := map[string]any{"query": query}
-	raw, err := c.graphqlPost(ctx, DocIDSearch, vars)
-	if err != nil {
-		return nil, err
-	}
-	return postsFromGraphQL(raw), nil
-}
-
-// graphqlPost POSTs a persisted query and returns the decoded data tree.
+// graphqlPost POSTs a persisted query and returns the decoded data tree. The
+// error is classified so callers (and the user) can tell a network failure, an
+// HTML/login-wall answer, a GraphQL "errors" payload, null data, and a shape
+// change apart instead of everything collapsing into "doc_id may be stale".
 func (c *Client) graphqlPost(ctx context.Context, docID string, vars map[string]any) (any, error) {
 	maps.Copy(vars, relayProviderVars())
 	varsJSON, _ := json.Marshal(vars)
@@ -100,7 +94,8 @@ func (c *Client) graphqlPost(ctx context.Context, docID string, vars map[string]
 	if c.cfg.CSRF != "" {
 		req.Header.Set("X-CSRFToken", c.cfg.CSRF)
 	}
-	c.logf(2, "POST graphql doc_id=%s", docID)
+
+	c.logf(2, "POST %s doc_id=%s vars=%s", GraphQLURL, docID, truncateBytes(varsJSON, 512))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, codeErr(ExitNetwork, "graphql request: %v", err)
@@ -110,17 +105,104 @@ func (c *Client) graphqlPost(ctx context.Context, docID string, vars map[string]
 	if err != nil {
 		return nil, err
 	}
-	var env struct {
-		Data json.RawMessage `json:"data"`
+
+	ctype := resp.Header.Get("Content-Type")
+	c.logf(2, "graphql resp status=%d content-type=%q bytes=%d", resp.StatusCode, ctype, len(body))
+
+	if resp.StatusCode == 429 || resp.StatusCode == 503 {
+		return nil, codeErr(ExitRateLimit, "graphql rate limited (HTTP %d)", resp.StatusCode)
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, codeErr(ExitNetwork, "graphql HTTP %d (content-type %q)", resp.StatusCode, ctype)
+	}
+
+	// A non-JSON answer means the request was routed to the app shell (HTML)
+	// rather than the API, e.g. the endpoint rejected the request before GraphQL
+	// ran. Surface what came back instead of pretending it is a JSON shape issue.
+	if !strings.Contains(ctype, "json") && !strings.Contains(ctype, "javascript") && !strings.Contains(ctype, "text") {
+		c.logf(2, "graphql body[%d] = %s", len(body), truncateBytes(body, 512))
+		return nil, codeErr(ExitNotFound, "graphql returned %q (status %d), not JSON; the endpoint may be gating this request", ctype, resp.StatusCode)
+	}
+
+	var env graphqlEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, codeErr(ExitNotFound, "graphql returned an unexpected shape (doc_id may be stale)")
+		c.logf(2, "graphql body[%d] = %s", len(body), truncateBytes(body, 512))
+		return nil, codeErr(ExitNotFound, "graphql returned non-JSON (status %d, content-type %q); the doc_id may be stale", resp.StatusCode, ctype)
 	}
+
+	if len(env.Errors) > 0 {
+		seen := map[string]bool{}
+		msgs := make([]string, 0, len(env.Errors))
+		for _, e := range env.Errors {
+			m := e.Message
+			if m == "" {
+				m = e.Summary
+			}
+			if m == "" {
+				m = e.Description
+			}
+			if m == "" {
+				m = fmt.Sprintf("code %d", e.Code)
+			}
+			if seen[m] {
+				continue
+			}
+			seen[m] = true
+			msgs = append(msgs, m)
+		}
+		if isStaleGraphQLError(env.Errors) {
+			return nil, codeErr(ExitOperationStale, "graphql operation is stale: %s", strings.Join(msgs, "; "))
+		}
+		return nil, codeErr(ExitNotFound, "graphql error: %s", strings.Join(msgs, "; "))
+	}
+
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return nil, codeErr(ExitNotFound, "graphql returned null data (doc_id %s may be stale, or anonymous search is gated)", docID)
+	}
+
 	var data any
 	if err := json.Unmarshal(env.Data, &data); err != nil {
-		return nil, codeErr(ExitNotFound, "graphql returned an unexpected shape (doc_id may be stale)")
+		return nil, codeErr(ExitNotFound, "graphql data has an unexpected shape")
 	}
 	return data, nil
+}
+
+// graphqlEnvelope is the outer GraphQL response wrapper Threads returns.
+type graphqlEnvelope struct {
+	Data   json.RawMessage `json:"data"`
+	Errors []graphqlError  `json:"errors"`
+}
+
+type graphqlError struct {
+	Message     string `json:"message"`
+	Severity    string `json:"severity"`
+	Code        int    `json:"code"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+}
+
+// isStaleGraphQLError reports whether a GraphQL errors payload indicates the
+// persisted query behind a doc_id has been rotated. Code 1675012 and the
+// "missing_required_variable_value" message are the signatures Threads returns
+// when a doc_id maps to a query whose required variables no longer match.
+func isStaleGraphQLError(errs []graphqlError) bool {
+	for _, e := range errs {
+		if e.Code == 1675012 {
+			return true
+		}
+		if strings.Contains(strings.ToLower(e.Message), "missing_required_variable_value") {
+			return true
+		}
+	}
+	return false
+}
+
+// truncateBytes clips a byte slice to n bytes for safe diagnostics output.
+func truncateBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
 }
 
 // postsFromGraphQL reuses the SSR thread_items walker over the GraphQL data

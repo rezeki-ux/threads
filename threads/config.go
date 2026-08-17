@@ -25,14 +25,14 @@ const (
 	APIBase    = "https://graph.threads.net/v1.0"
 )
 
-// doc_id values for the logged-out persisted queries. Threads rotates these
-// every two to four weeks; when a query starts returning an unexpected shape,
-// refresh these from a logged-out page load and the anonymous pagination path
-// recovers. The SSR path does not depend on them.
+// doc_id values for the logged-out persisted queries used by profile/post
+// pagination. Threads rotates these every few weeks; when a query starts
+// returning an unexpected shape, refresh these from a logged-out page load and
+// the anonymous pagination path recovers. The SSR path (profile, post, replies,
+// feed, and anonymous keyword search) does not depend on them.
 const (
 	DocIDProfileThreads = "33773912952222602" // a profile's threads tab
 	DocIDPostPage       = "7448594591874178"  // a single post page and its replies
-	DocIDSearch         = "24871030029227550" // keyword/user search
 )
 
 // Config is the resolved runtime configuration for a Client.
@@ -53,6 +53,13 @@ type Config struct {
 	Token   string // official Graph API token (own account)
 	Session string // logged-in session id cookie
 	CSRF    string // session CSRF token
+
+	// Logged-out persisted query ids for profile/post pagination. Threads
+	// rotates these every few weeks; the matching THREADS_DOC_ID_* environment
+	// variables let an operator refresh a rotated id without rebuilding.
+	// Anonymous keyword search does not use a doc_id (it is server-rendered).
+	DocIDProfileThreads string
+	DocIDPostPage       string
 }
 
 // DefaultConfig returns the built-in defaults with XDG paths filled in and the
@@ -70,7 +77,17 @@ func DefaultConfig() Config {
 		Token:     os.Getenv("THREADS_TOKEN"),
 		Session:   os.Getenv("THREADS_SESSION"),
 		CSRF:      os.Getenv("THREADS_CSRF"),
+
+		DocIDProfileThreads: envOr("THREADS_DOC_ID_PROFILE", DocIDProfileThreads),
+		DocIDPostPage:       envOr("THREADS_DOC_ID_POST", DocIDPostPage),
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func cacheHome() string {

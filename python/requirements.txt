@@ -1,0 +1,7 @@
+# The threads_scraper integration layer is stdlib-only (subprocess, json,
+# dataclasses, logging, unittest). No third-party packages are required at
+# runtime; it drives the compiled Go engine, never a browser.
+
+# Optional: PostgreSQL storage (storage/postgres.py). Install psycopg when you
+# use PostgresRepository; the rest of the package works without it.
+psycopg[binary]>=3.1

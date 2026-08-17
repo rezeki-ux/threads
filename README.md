@@ -77,17 +77,34 @@ default; the anonymous crawler is the floor everything else builds on.
 ## How it works
 
 `th` resolves any handle, id, shortcode, or URL to a typed identity first
-(`th id` shows exactly what it sees), then fetches the matching profile or post
-page with a crawler user agent. That page carries the post text, the engagement
-counts, the media, and a window of replies inside its embedded JSON; `th` walks
-that tree into records with the standard library alone. Past the rendered
-window, a set of logged-out persisted queries extend the walk by cursor while
-they remain current. Responses are cached on disk by URL, so re-running a
-command is instant and polite to Threads.
+(`th id` shows exactly what it sees), then fetches the matching profile, post, or
+search page with a crawler user agent. That page carries the post text, the
+engagement counts, the media, and a window of replies inside its embedded JSON;
+`th` walks that tree into records with the standard library alone. Past the
+rendered window, a set of logged-out persisted queries extend the profile/post
+walk by cursor while they remain current. Responses are cached on disk by URL, so
+re-running a command is instant and polite to Threads.
 
 Every record is a plain struct with JSON tags, so `-o json` gives you the full
 shape and `--fields` narrows it. Nothing is invented: a field that Threads does
 not surface anonymously simply stays empty rather than being guessed.
+
+### Search, pagination, and "recent"
+
+Anonymous keyword search reads the server-rendered `/search?q=...` page. The
+crawler surface returns a single window of results (the page reports
+`has_next_page: false` and no cursor), so `th` does not fabricate a continuation:
+`-n 50` returns up to however many results the window carries.
+
+The logged-out search page exposes no "Top"/"Recent" sort control, so `th` does
+not pretend to support one. `--type recent` (anything other than the default
+`top`) is rejected with a clear message rather than silently returning the same
+results.
+
+Scrapling (under `discovery/`) is a diagnostics/discovery layer only, used to
+investigate how Threads changes its search surface. It is not a runtime
+dependency: basic search, profile, post, feed, and replies all work without a
+browser.
 
 ## Commands
 
@@ -121,6 +138,16 @@ Get a post and its whole reply thread:
 ```sh
 th post <url> --replies -o jsonl
 ```
+
+Keyword search across public posts:
+
+```sh
+th search "artificial intelligence" -n 50 -o jsonl
+```
+
+Search is anonymous and server-rendered, exactly like `profile`: it reads the
+crawler's `/search?q=...` page, so it needs no login, no cookie, no browser, and
+no GraphQL `doc_id`.
 
 Collect every media URL from a profile's posts:
 
@@ -167,6 +194,41 @@ th profile zuck --posts --template '{{.permalink}} {{.likes}}'
 `--raw` (on `post`) prints the upstream HTML untouched, for when you want to
 parse it yourself.
 
+## Python integration
+
+A typed, stdlib-only Python client (`python/threads_scraper/`) drives the Go
+engine over a subprocess and returns dataclasses — no browser, no Scrapling, no
+GraphQL `doc_id` on this path. It reads JSON from stdout and keeps the raw
+payload on every record so new metadata is never dropped.
+
+```python
+from threads_scraper import ThreadsScraper
+
+scraper = ThreadsScraper()
+results = scraper.search("AI", limit=10)          # list[SearchResult]
+profile = scraper.profile("zuck")                 # Profile
+posts   = scraper.feed("zuck", limit=10)          # list[Post]
+post    = scraper.post("https://www.threads.com/@zuck/post/Db2wI-DilLt")
+replies = scraper.replies("https://www.threads.com/@zuck/post/Db2wI-DilLt", limit=10)
+```
+
+The binary is resolved in this order (no assumption that `go` is on `PATH`):
+
+1. `THREADS_BINARY` — path to a compiled `threads.exe` (preferred),
+2. `threads.exe` next to the repository root,
+3. `THREADS_GO_BINARY` — a `go` executable, used as `go run .\cmd\th`.
+
+Every `Post`/`Reply` exposes `to_db_row()` returning a PostgreSQL-ready mapping
+(`platform`, `external_id` = the Threads id, engagement counts, `media_urls`,
+`permalink`, and `raw_payload` for the full record as JSONB).
+
+A storage layer (`threads_scraper.storage`) ships two `Repository`
+implementations with the same idempotent-upsert interface: `PostgresRepository`
+(psycopg, parameterized SQL, schema in `storage/schema.sql`) and an
+`InMemoryRepository` for tests. Re-scraping the same post updates the row keyed
+by `(platform, external_id)` instead of duplicating it. See
+`examples/etl_demo.py` for the full scrape → DB pipeline.
+
 ## Configuration
 
 `th` keeps its cache and data under the standard XDG paths (`~/.cache/th` and
@@ -189,6 +251,16 @@ Useful global flags (all have sensible defaults):
 | `--no-cache` | Bypass the on-disk cache |
 | `--token` | Official Graph API token (or `THREADS_TOKEN`) |
 | `--session` / `--csrf` | Logged-in session (or `THREADS_SESSION` / `THREADS_CSRF`) |
+
+Environment variables (all optional):
+
+| Variable | Meaning |
+| --- | --- |
+| `THREADS_TOKEN` | Official Graph API token (own account) |
+| `THREADS_SESSION` / `THREADS_CSRF` | Logged-in session cookie / CSRF token |
+| `THREADS_DOC_ID_PROFILE` / `THREADS_DOC_ID_POST` | Rotating persisted-query ids for profile/post pagination |
+| `THREADS_BINARY` | Compiled `threads.exe` path for the Python client |
+| `THREADS_GO_BINARY` | `go.exe` path for the Python client (`go run` fallback) |
 
 ## Exit codes
 

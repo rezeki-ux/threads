@@ -133,6 +133,8 @@ func (c *Client) fetch(ctx context.Context, target string) ([]byte, error) {
 		switch {
 		case code == 404:
 			return body, errNotFound(target)
+		case code == 401 || code == 403:
+			return body, codeErr(ExitNotFound, "Threads denied the request (HTTP %d)", code)
 		case code == 429 || code == 503:
 			if attempt == attempts {
 				return body, codeErr(ExitRateLimit, "rate limited (HTTP %d) after %d attempts", code, attempts)

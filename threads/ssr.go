@@ -15,10 +15,11 @@ import (
 // that surface with the standard library alone.
 
 var (
-	ogRe     = regexp.MustCompile(`<meta[^>]+property="og:([a-z_:]+)"[^>]+content="([^"]*)"`)
-	ogRe2    = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([a-z_:]+)"`)
-	sjsRe    = regexp.MustCompile(`(?s)<script type="application/json"[^>]*>(.*?)</script>`)
-	atHandle = regexp.MustCompile(`@([A-Za-z0-9._]+)`)
+	ogRe      = regexp.MustCompile(`<meta[^>]+property="og:([a-z_:]+)"[^>]+content="([^"]*)"`)
+	ogRe2     = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([a-z_:]+)"`)
+	sjsRe     = regexp.MustCompile(`(?s)<script type="application/json"[^>]*>(.*?)</script>`)
+	atHandle  = regexp.MustCompile(`@([A-Za-z0-9._]+)`)
+	hashtagRe = regexp.MustCompile(`#([A-Za-z0-9_]+)`)
 )
 
 // ogMeta pulls every og:* value out of the page, handling both attribute
@@ -242,6 +243,11 @@ func parsePost(data map[string]any) Post {
 		p.Timestamp = time.Unix(int64(ts), 0).UTC()
 	}
 	p.LikeCount = int64(asFloat(data["like_count"]))
+	p.CanonicalURL = asString(data["canonical_url"])
+	p.IsPaidPartnership = asBool(data["is_paid_partnership"])
+	p.HasAudio = asBool(data["has_audio"])
+	p.Width = int(asFloat(data["original_width"]))
+	p.Height = int(asFloat(data["original_height"]))
 
 	switch int(asFloat(data["media_type"])) {
 	case 1:
@@ -264,27 +270,101 @@ func parsePost(data map[string]any) Post {
 	if user, ok := data["user"].(map[string]any); ok {
 		p.Username = asString(user["username"])
 		p.UserID = asString(user["pk"])
+		p.AuthorName = asString(user["full_name"])
+		p.AuthorAvatarURL = asString(user["profile_pic_url"])
+		p.AuthorVerified = asBool(user["is_verified"])
 	}
 
 	if tpi, ok := data["text_post_app_info"].(map[string]any); ok {
 		p.ReplyCount = int64(asFloat(tpi["direct_reply_count"]))
 		p.RepostCount = int64(asFloat(tpi["repost_count"]))
 		p.QuoteCount = int64(asFloat(tpi["quote_count"]))
-		if q, ok := tpi["is_quote_post"].(bool); ok {
-			p.IsQuotePost = q
+		p.ReshareCount = int64(asFloat(tpi["reshare_count"]))
+		// is_reply is the authoritative flag; reply_to_author is the fallback
+		// for records where the flag is absent.
+		if isReply, ok := tpi["is_reply"].(bool); ok {
+			p.IsReply = isReply
 		}
 		if rt := tpi["reply_to_author"]; rt != nil {
 			p.IsReply = true
 			if author, ok := rt.(map[string]any); ok {
-				p.ReplyToID = asString(author["pk"])
+				p.ReplyToID = asString(author["id"])
+				if p.ReplyToID == "" {
+					p.ReplyToID = asString(author["pk"])
+				}
+				p.ReplyToUsername = asString(author["username"])
 			}
 		}
+		// A quote is signaled by share_info.quoted_post carrying the quoted
+		// post's record.
+		if si, ok := tpi["share_info"].(map[string]any); ok {
+			if qp, ok := si["quoted_post"].(map[string]any); ok {
+				p.IsQuotePost = true
+				p.QuotedPostID = asString(qp["pk"])
+				if p.QuotedPostID == "" {
+					p.QuotedPostID = asString(qp["id"])
+				}
+			}
+		}
+		p.Mentions = extractMentions(data)
+		p.Hashtags = extractHashtags(p.Text)
 	}
 
 	if p.Shortcode != "" && p.Username != "" {
 		p.Permalink = WebBase + "/@" + p.Username + "/post/" + p.Shortcode
 	}
 	return p
+}
+
+// extractMentions reads the structured text_fragments mention entries (which
+// carry the mentioned user id), falling back to a regex over the caption text
+// when fragments are absent.
+func extractMentions(data map[string]any) []string {
+	if tpi, ok := data["text_post_app_info"].(map[string]any); ok {
+		if tf, ok := tpi["text_fragments"].(map[string]any); ok {
+			if frags, ok := tf["fragments"].([]any); ok {
+				var out []string
+				seen := map[string]bool{}
+				for _, item := range frags {
+					fm, ok := item.(map[string]any)
+					if !ok || asString(fm["fragment_type"]) != "mention" {
+						continue
+					}
+					mf, _ := fm["mention_fragment"].(map[string]any)
+					mu, _ := mf["mentioned_user"].(map[string]any)
+					if u := asString(mu["username"]); u != "" && !seen[u] {
+						seen[u] = true
+						out = append(out, u)
+					}
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	if capt, ok := data["caption"].(map[string]any); ok {
+		return uniqueMatches(atHandle, asString(capt["text"]))
+	}
+	return nil
+}
+
+// extractHashtags pulls #topic tokens from the caption text.
+func extractHashtags(text string) []string {
+	return uniqueMatches(hashtagRe, text)
+}
+
+// uniqueMatches collects the first capture group of each unique regexp match.
+func uniqueMatches(re *regexp.Regexp, s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		if len(m) > 1 && m[1] != "" && !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
 }
 
 func mergeProfile(p *Profile, u map[string]any) {
@@ -306,6 +386,14 @@ func mergeProfile(p *Profile, u map[string]any) {
 	if b, ok := u["is_verified"].(bool); ok {
 		p.IsVerified = b
 	}
+	if b, ok := u["text_post_app_is_private"].(bool); ok {
+		p.IsPrivate = b
+	}
+	if links, ok := u["bio_links"].([]any); ok && len(links) > 0 {
+		if l, ok := links[0].(map[string]any); ok {
+			p.ExternalURL = asString(l["url"])
+		}
+	}
 	if f := asFloat(u["follower_count"]); f > 0 {
 		p.FollowerCount = int64(f)
 	}
@@ -324,6 +412,11 @@ func asString(v any) string {
 		return strconv.FormatInt(int64(x), 10)
 	}
 	return ""
+}
+
+func asBool(v any) bool {
+	b, _ := v.(bool)
+	return b
 }
 
 func asFloat(v any) float64 {

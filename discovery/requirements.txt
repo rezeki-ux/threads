@@ -1,0 +1,5 @@
+# The base scrapling package only ships the parser engine. The browser-based
+# DynamicFetcher (used for GraphQL operation discovery) requires the `fetchers`
+# extra, which pulls playwright, msgspec, browserforge, patchright, etc. at the
+# exact versions scrapling 0.4.8 pins.
+scrapling[fetchers]>=0.4.8

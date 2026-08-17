@@ -4,6 +4,14 @@
 *.test
 .DS_Store
 
+# Built binary and Python bytecode / test artifacts
+/threads.exe
+__pycache__/
+*.pyc
+/posts.jsonl
+/profile.json
+/threads.db
+
 # Built docs site (tago output) and its cache
 /docs/public/
 /docs/public-pages/
